@@ -65,6 +65,7 @@ class get_model(nn.Module):
         if self.require_init:
             pass
         if self.opt.seqLen > 1:
+            # self.lstm = nn.LSTM(input_size=9216, hidden_size=self.opt.output_dim, num_layers=1, batch_first=True)
             self.lstm = nn.LSTM(input_size=9216, hidden_size=self.opt.output_dim, num_layers=1, batch_first=True)
 
     def forward(self, input):                                                  # ([32, 3, 3, 200, 200])

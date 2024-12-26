@@ -23,7 +23,8 @@ import atexit
 os.sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
 # private library
-import nuscene as dataset
+# import nuscene as dataset
+import SnailRadar as dataset
 import evaluate as evaluate
 
 class FixRandom():
@@ -78,7 +79,7 @@ def update_opt_from_json(flag_file, opt):
     return opt
 
 
-def evaluate_model(opt, seed_worker=None,):
+def evaluate_model(opt, seed_worker=None, structDir='',imgDir=''):
     # load configurations
     opt.runsPath = opt.resume
     print('resume path:', opt.resume)
@@ -99,25 +100,30 @@ def evaluate_model(opt, seed_worker=None,):
     model.load_state_dict(checkpoint['state_dict'])
     model.to(device)
 
+    opt.structDir = structDir
+    opt.imgDir = imgDir
+
     # load dataset
     if opt.split == 'val':
         whole_test_set = dataset.get_whole_val_set(opt)
+        val_set = dataset.get_val_query_set(opt, opt.margin)
     elif opt.split == 'test':
         whole_test_set = dataset.get_whole_test_set(opt)
-    print('database:{}, query:{}'.format(whole_test_set.dbStruct.numDb, whole_test_set.dbStruct.numQ))
+    # print('database:{}, query:{}'.format(whole_test_set.dbStruct.numDb, whole_test_set.dbStruct.numQ))
 
     # evaluate
-    recalls = evaluate.get_recall(opt, model, whole_test_set, seed_worker)
+    # recalls = evaluate.get_recall(opt, model, whole_test_set, seed_worker)
+    current_recalls, one_percent_recall = evaluate.get_recall(opt, model, whole_test_set, val_set, seed_worker)
 
     # export results
     with open(os.path.join(opt.runsPath, 'evaluate.log'), 'a') as f:
         f.write('[{}]\t'.format(opt.split))
-        f.write('recall@1: {:.2f}\t'.format(recalls[1]))
-        f.write('recall@5: {:.2f}\t'.format(recalls[5]))
-        f.write('recall@10: {:.2f}\t'.format(recalls[10]))
-        f.write('recall@20: {:.2f}\n'.format(recalls[20]))
+        f.write('EVAL RECALL: %s' % str(current_recalls))
+        f.write('EVAL one_percent_recall: %s' % str(one_percent_recall))
+        # f.write('recall@10: {:.2f}\t'.format(recalls[9]))
+        # f.write('recall@20: {:.2f}\n'.format(recalls[19]))
         f.flush()
-    return recalls
+    return current_recalls, one_percent_recall
 
 
 def train(opt, seed_worker=None, trial=None):
@@ -211,11 +217,11 @@ def train(opt, seed_worker=None, trial=None):
     whole_training_data_loader = DataLoader(dataset=whole_train_set, num_workers=opt.threads, batch_size=opt.cacheBatchSize, shuffle=False, pin_memory=cuda, worker_init_fn=seed_worker)
     whole_val_set = dataset.get_whole_val_set(opt)
     whole_val_data_loader = DataLoader(dataset=whole_val_set, num_workers=opt.threads, batch_size=opt.cacheBatchSize, shuffle=False, pin_memory=cuda, worker_init_fn=seed_worker)
-    whole_test_set = dataset.get_whole_test_set(opt)
+    # whole_test_set = dataset.get_whole_test_set(opt)
     # for train tuples
     train_set = dataset.get_training_query_set(opt, opt.margin)
     val_set = dataset.get_val_query_set(opt, opt.margin)
-    print('train database:{}, training query:{}, val query:{}, test query:{}'.format(train_set.dbStruct.numDb, len(train_set), whole_val_set.dbStruct.numQ, whole_test_set.dbStruct.numQ))
+    # print('train database:{}, training query:{}, val query:{}, test query:{}'.format(train_set.dbStruct.numDb, len(train_set), whole_val_set.dbStruct.numQ, whole_test_set.dbStruct.numQ))
 
     # -------------------------------------- 5. tensorboard -------------------------------------- #
     writer = SummaryWriter(log_dir=opt.runsPath)
@@ -236,7 +242,7 @@ def train(opt, seed_worker=None, trial=None):
         # ------------------------------------ 6.1 build cache ----------------------------------- #
         print('build cache..')
         model.eval()
-        train_set.cache = os.path.join(opt.runsPath, train_set.whichSet + '_feat_cache.hdf5')
+        train_set.cache = os.path.join(opt.runsPath, 'train_feat_cache.hdf5')
         with h5py.File(train_set.cache, mode='w') as h5:
             h5feat = h5.create_dataset("features", [len(whole_train_set), opt.output_dim], dtype=np.float32)
             with torch.no_grad():
@@ -307,12 +313,12 @@ def train(opt, seed_worker=None, trial=None):
         if opt.optim == 'sgd':
             scheduler.step()
 
-        if (epoch % opt.evalEvery) == 0:
-            current_recalls = evaluate.get_recall(opt, model, whole_val_set, seed_worker, epoch, writer)
+        if (epoch % opt.evalEvery) == 0 or epoch == 1 or epoch == opt.nEpochs:
+            current_recalls, one_percent_recall = evaluate.get_recall(opt, model, whole_val_set, val_set, seed_worker, epoch, writer)
             is_best = 0
 
             if epoch > 25:
-                is_best = current_recalls[1] > best_recall_at_1
+                is_best = current_recalls[0] > best_recall_at_1
                 if is_best:
                     not_improved = 0
                     best_recall_at_1 = current_recalls[1]
@@ -330,9 +336,14 @@ def train(opt, seed_worker=None, trial=None):
                     print('Performance did not improve for', opt.patience, 'epochs. Stopping.')
                     break
 
-            quick_log('screen.log', 'epoch: {:>2d}\t'.format(epoch), 'lr: {:>.8f}\t'.format(current_lr), 'train loss: {:>.4f}\t'.format(train_avg_loss),
-                      'recall@1: {:.2f}\t'.format(current_recalls[1]), 'recall@5: {:.2f}\t'.format(current_recalls[5]), 'recall@10: {:.2f}\t'.format(current_recalls[10]),
-                      'recall@20: {:.2f}\t'.format(current_recalls[20]), '*\n' if is_best else '\n')
+            # quick_log('screen.log', 'epoch: {:>2d}\t'.format(epoch), 'lr: {:>.8f}\t'.format(current_lr), 'train loss: {:>.4f}\t'.format(train_avg_loss),
+            #           'recall@1: {:.2f}\t'.format(current_recalls[1]), 'recall@5: {:.2f}\t'.format(current_recalls[5]), 'recall@10: {:.2f}\t'.format(current_recalls[10]),
+            #           'recall@20: {:.2f}\t'.format(current_recalls[20]), '*\n' if is_best else '\n')
+            quick_log('screen.log', 'epoch: {:>2d}\t'.format(epoch), 'lr: {:>.8f}\t'.format(current_lr),
+                      'train loss: {:>.4f}\t'.format(train_avg_loss),
+                      'EVAL RECALL: %s' % str(current_recalls),
+                      'EVAL one_percent_recall: %s' % str(one_percent_recall),
+                      '*\n' if is_best else '\n')
 
     writer.close()
     torch.save({
@@ -351,10 +362,10 @@ if __name__ == '__main__':
     parser.add_argument('--structDir', type=str, default='dataset/7n5s_xy11', help='Path for structure.')
     parser.add_argument('--imgDir', type=str, default='dataset/7n5s_xy11/img', help='Path for images.')
     parser.add_argument('--comment', type=str, default='', help='comment')
-    parser.add_argument('--seqLen', type=int, default=1, help='number of sequence to use.')
-    parser.add_argument('--mode', type=str, default='train', help='mode', choices=['train', 'evaluate'])
-    parser.add_argument('--net', type=str, default='st', help='network')
-    parser.add_argument('--batchSize', type=int, default=8, help='Number of triplets (query, pos, negs). Each triplet consists of 12 images.')
+    parser.add_argument('--seqLen', type=int, default=3, help='number of sequence to use.')
+    parser.add_argument('--mode', type=str, default='evaluate', help='mode', choices=['train', 'evaluate'])
+    parser.add_argument('--net', type=str, default='autoplace', help='network')
+    parser.add_argument('--batchSize', type=int, default=16, help='Number of triplets (query, pos, negs). Each triplet consists of 12 images.')
     parser.add_argument('--cacheBatchSize', type=int, default=32, help='Batch size for caching and testing')
     parser.add_argument('--cacheRefreshRate', type=int, default=0, help='How often to refresh cache, in number of queries. 0 for off')
     parser.add_argument('--nEpochs', type=int, default=50, help='number of epochs to train for')
@@ -377,11 +388,21 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=5, help='Patience for early stopping. 0 is off.')
     parser.add_argument('--split', type=str, default='val', help='Split to use', choices=['val', 'test'])
     parser.add_argument('--num_clusters', type=int, default=64, help='Number of NetVlad clusters. Default=64')
-    parser.add_argument('--encoder_dim', type=int, default=512, help='Number of feature dimension. Default=512')
-    parser.add_argument('--output_dim', type=int, default=32768, help='Number of feature dimension. Default=512')
+    parser.add_argument('--encoder_dim', type=int, default=256, help='Number of feature dimension. Default=512')
+    parser.add_argument('--output_dim', type=int, default=4096, help='Number of feature dimension. Default=512')
     parser.add_argument('--margin', type=float, default=0.1, help='Margin for triplet loss. Default=0.1')
     parser.add_argument('--fromscratch', action='store_true', help='Train from scratch rather than using pretrained models')
+    parser.add_argument('--results_dir', default='results/',  help='results dir [default: results]')
     opt = parser.parse_args()
+
+    opt.EVAL_TRAIN_FILE = 'train.pickle'
+    opt.EVAL_DATABASE_FILE = 'evaluation_database_test.pickle'
+    opt.EVAL_QUERY_FILE = 'evaluation_query_test_9m_30.pickle'
+    data_type = opt.structDir.split('_')[-1]
+    if not os.path.exists(opt.results_dir):
+        os.makedirs(opt.results_dir)
+    opt.results = os.path.join(opt.results_dir, data_type +'.txt')
+    opt.save_features = False
 
     fix_random = FixRandom(opt.seed)
     seed_worker = fix_random.seed_worker
@@ -391,4 +412,4 @@ if __name__ == '__main__':
         last_recall_1 = train(opt, seed_worker)
         print('last_recall_1:', last_recall_1)
     elif opt.mode == 'evaluate':
-        evaluate_model(opt, seed_worker)
+        evaluate_model(opt, seed_worker, opt.structDir, opt.imgDir)
